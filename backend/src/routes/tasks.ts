@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
 import { requireAuth } from "../middleware/auth";
 import { getProjectRole } from "../utils/access";
@@ -12,14 +13,25 @@ async function roleIn(
   projectId: number
 ): Promise<"ADMIN" | "MANAGER" | "MEMBER" | "VIEWER" | null> {
   if (user.role === "ADMIN") return "ADMIN";
-  return getProjectRole(user.id, projectId);
+  if (user.role === "VIEWER") {
+    const membership = await getProjectRole(user.id, projectId);
+    return membership ? "VIEWER" : null;
+  }
+  const projectRole = await getProjectRole(user.id, projectId);
+  if (!projectRole) return null;
+  if (projectRole === "MANAGER") return user.role === "PROJECT_MANAGER" ? "MANAGER" : "MEMBER";
+  if (projectRole === "MEMBER") return "MEMBER";
+  return "VIEWER";
 }
 const canManage = (r: string | null) => r === "ADMIN" || r === "MANAGER";
 
 // Assignee must be a non-viewer member of the project
 async function validAssignee(projectId: number, userId: number) {
-  const m = await prisma.projectMember.findUnique({ where: { projectId_userId: { projectId, userId } } });
-  return !!m && m.role !== "VIEWER";
+  const [membership, user] = await Promise.all([
+    prisma.projectMember.findUnique({ where: { projectId_userId: { projectId, userId } } }),
+    prisma.user.findUnique({ where: { id: userId }, select: { isActive: true, role: true } }),
+  ]);
+  return !!membership && membership.role !== "VIEWER" && !!user?.isActive && user.role !== "VIEWER";
 }
 
 const taskInclude = {
@@ -38,14 +50,21 @@ projectTasksRouter.get("/", async (req, res) => {
   if (!(await roleIn(req.user!, projectId))) return res.status(404).json({ message: "Project not found" });
 
   const { status, priority, assigneeId } = req.query;
-  const where: any = { projectId };
-  if (["TODO", "IN_PROGRESS", "DONE"].includes(String(status))) where.status = status;
-  if (["LOW", "MEDIUM", "HIGH"].includes(String(priority))) where.priority = priority;
+  const page = Math.max(1, Number.parseInt(String(req.query.page ?? "1"), 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(String(req.query.limit ?? "50"), 10) || 50));
+  const search = typeof req.query.search === "string" ? req.query.search.trim().slice(0, 100) : "";
+  const where: Prisma.TaskWhereInput = { projectId };
+  if (["TODO", "IN_PROGRESS", "DONE"].includes(String(status))) where.status = status as "TODO" | "IN_PROGRESS" | "DONE";
+  if (["LOW", "MEDIUM", "HIGH"].includes(String(priority))) where.priority = priority as "LOW" | "MEDIUM" | "HIGH";
   if (assigneeId === "none") where.assigneeId = null;
-  else if (parseId(assigneeId)) where.assigneeId = parseId(assigneeId);
+  else if (parseId(assigneeId)) where.assigneeId = parseId(assigneeId)!;
+  if (search) where.OR = [{ title: { contains: search, mode: "insensitive" } }, { description: { contains: search, mode: "insensitive" } }];
 
-  const tasks = await prisma.task.findMany({ where, orderBy: { createdAt: "desc" }, include: taskInclude });
-  res.json({ tasks });
+  const [tasks, total] = await prisma.$transaction([
+    prisma.task.findMany({ where, skip: (page - 1) * limit, take: limit, orderBy: { createdAt: "desc" }, include: taskInclude }),
+    prisma.task.count({ where }),
+  ]);
+  res.json({ tasks, pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) } });
 });
 
 // POST /projects/:id/tasks   (Admin or Manager)
@@ -92,11 +111,12 @@ taskRouter.patch("/:id", async (req, res) => {
   const id = parseId((req.params as { id?: string }).id);
   if (!id) return res.status(400).json({ message: "Invalid task id" });
 
-  const task = await prisma.task.findUnique({ where: { id } });
+  const task = await prisma.task.findUnique({ where: { id }, include: { project: { select: { status: true } } } });
   if (!task) return res.status(404).json({ message: "Task not found" });
   const role = await roleIn(req.user!, task.projectId);
   if (!role) return res.status(404).json({ message: "Task not found" });
   if (role === "VIEWER") return res.status(403).json({ message: "Viewers cannot change tasks" });
+  if (task.project.status === "ARCHIVED") return res.status(400).json({ message: "Archived projects are read-only" });
 
   const parsed = updateTaskSchema.safeParse(req.body);
   if (!parsed.success) return validationError(res, parsed.error);
@@ -140,6 +160,8 @@ taskRouter.delete("/:id", async (req, res) => {
   const role = await roleIn(req.user!, task.projectId);
   if (!role) return res.status(404).json({ message: "Task not found" });
   if (!canManage(role)) return res.status(403).json({ message: "Only an Admin or the project manager can delete tasks" });
+  const parentProject = await prisma.project.findUnique({ where: { id: task.projectId }, select: { status: true } });
+  if (parentProject?.status === "ARCHIVED") return res.status(400).json({ message: "Archived projects are read-only" });
 
   await prisma.task.delete({ where: { id } });
   res.json({ message: "Task deleted" });
@@ -169,6 +191,8 @@ taskRouter.post("/:id/comments", async (req, res) => {
   const role = await roleIn(req.user!, task.projectId);
   if (!role) return res.status(404).json({ message: "Task not found" });
   if (role === "VIEWER") return res.status(403).json({ message: "Viewers cannot comment" });
+  const parentProject = await prisma.project.findUnique({ where: { id: task.projectId }, select: { status: true } });
+  if (parentProject?.status === "ARCHIVED") return res.status(400).json({ message: "Archived projects are read-only" });
 
   const parsed = commentSchema.safeParse(req.body);
   if (!parsed.success) return validationError(res, parsed.error);
@@ -189,6 +213,8 @@ taskRouter.delete("/:id/comments/:commentId", async (req, res) => {
   if (!comment || comment.taskId !== id) return res.status(404).json({ message: "Comment not found" });
   const role = await roleIn(req.user!, comment.task.projectId);
   if (!role) return res.status(404).json({ message: "Comment not found" });
+  const parentProject = await prisma.project.findUnique({ where: { id: comment.task.projectId }, select: { status: true } });
+  if (parentProject?.status === "ARCHIVED") return res.status(400).json({ message: "Archived projects are read-only" });
   if (comment.authorId !== req.user!.id && !canManage(role)) {
     return res.status(403).json({ message: "You can only delete your own comments" });
   }

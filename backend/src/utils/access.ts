@@ -22,6 +22,9 @@ export async function canViewProject(user: CurrentUser, projectId: number): Prom
 // Can this user MANAGE the project (edit, archive)?  Admin, or MANAGER of that project.
 export async function canManageProject(user: CurrentUser, projectId: number): Promise<boolean> {
   if (user.role === "ADMIN") return true;
+  // A project-level manager assignment only grants management rights while
+  // the account still has the global Project Manager role.
+  if (user.role !== "PROJECT_MANAGER") return false;
   const role = await getProjectRole(user.id, projectId);
   return role === "MANAGER";
 }

@@ -6,19 +6,18 @@ import { prisma } from "./prisma";
 import authRoutes from "./routes/auth";
 import projectRoutes from "./routes/projects";
 import { projectTasksRouter, taskRouter } from "./routes/tasks";
-config();
-
+import userRoutes from "./routes/users";
 if (!process.env.JWT_SECRET) {
   throw new Error("JWT_SECRET is missing in .env");
 }
-
+config();
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
 
 // ---------- Middleware ----------
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL,
+    origin: process.env.FRONTEND_URL || "http://localhost:3000",
     credentials: true,
   })
 );
@@ -38,6 +37,7 @@ app.get("/health", async (_req, res) => {
 });
 
 app.use("/auth", authRoutes);
+app.use("/users", userRoutes);
 app.use("/projects", projectRoutes);
 app.use("/projects/:id/tasks", projectTasksRouter);
 app.use("/tasks", taskRouter);
@@ -53,6 +53,17 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
   res.status(500).json({ message: "Something went wrong on the server" });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Backend running at http://localhost:${PORT}`);
+});
+
+process.on("SIGINT", async () => {
+  server.close();
+  await prisma.$disconnect();
+  process.exit(0);
+});
+process.on("SIGTERM", async () => {
+  server.close();
+  await prisma.$disconnect();
+  process.exit(0);
 });

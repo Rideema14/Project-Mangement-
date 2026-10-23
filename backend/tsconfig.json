@@ -3,7 +3,6 @@
     "target": "ES2022",
     "module": "CommonJS",
     "moduleResolution": "node",
-    "ignoreDeprecations": "6.0",
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "strict": true,
@@ -11,5 +10,9 @@
     "outDir": "dist",
     "rootDir": "."
   },
-  "include": ["src/**/*", "prisma/**/*", "prisma.config.ts"]
+  "include": [
+    "src/**/*",
+    "prisma/**/*",
+    "prisma.config.ts"
+  ]
 }

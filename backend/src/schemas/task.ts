@@ -20,6 +20,8 @@ export const updateTaskSchema = z.object({
   priority: priority.optional(),
   dueDate: z.coerce.date().nullable().optional(),
   assigneeId: z.number().int().positive().nullable().optional(),
+}).refine((data) => Object.keys(data).some((key) => key !== "version"), {
+  message: "Send at least one task field to update",
 });
 
 export const commentSchema = z.object({
