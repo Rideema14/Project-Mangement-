@@ -6,6 +6,7 @@ import type {
   AiPlan,
   AuditLogEntry,
   AuthPayload,
+  CurrentUserPayload,
   Board,
   LoginEvent,
   OrgRole,
@@ -29,13 +30,19 @@ import type {
 // ---------- Auth (public) ----------
 
 export const authApi = {
-  /** POST /api/auth/register -> 201 { user, token } */
+  /** POST /api/auth/register -> 201 { message, user }; session cookie is set by backend. */
   register: (input: { name: string; email: string; password: string }) =>
     api.post<AuthPayload>('/api/auth/register', input),
 
-  /** POST /api/auth/login -> 200 { user, token } */
+  /** POST /api/auth/login -> 200 { message, user }; session cookie is set by backend. */
   login: (input: { email: string; password: string }) =>
     api.post<AuthPayload>('/api/auth/login', input),
+
+  /** GET /api/auth/me validates the httpOnly cookie and returns the current user. */
+  me: () => api.get<CurrentUserPayload>('/api/auth/me'),
+
+  /** POST /api/auth/logout clears the httpOnly session cookie. */
+  logout: () => api.post<{ message: string }>('/api/auth/logout'),
 };
 
 // ---------- Users (authenticated) ----------
@@ -46,25 +53,43 @@ export const usersApi = {
    * Powers the "Assign to" picker. The backend has no roles and no per-project
    * membership, so this really is "everyone".
    */
-  list: (signal?: AbortSignal) => api.get<User[]>('/api/users', signal),
+  list: async (signal?: AbortSignal) => {
+    const result = await api.get<{ users: User[] }>('/api/users', signal);
+    return result.users;
+  },
 };
 
 // ---------- Projects (authenticated) ----------
 
 export const projectsApi = {
   /** GET /api/projects -> all projects, newest first. */
-  list: (signal?: AbortSignal) => api.get<Project[]>('/api/projects', signal),
+  list: async (signal?: AbortSignal) => {
+    const result = await api.get<{ projects: Array<Record<string, unknown>> }>('/api/projects', signal);
+    return result.projects.map((project) => ({
+      ...project,
+      archived: project.status === 'ARCHIVED',
+      createdBy: { id: Number(project.createdById ?? 0) },
+    })) as Project[];
+  },
 
   /**
    * POST /api/projects -> 201.
    * The response omits the creator's name (see Project type), so callers that
    * need a list-shaped project should refetch rather than use this directly.
    */
-  create: (input: { name: string }) => api.post<Project>('/api/projects', input),
+  create: async (input: { name: string }) => {
+    const result = await api.post<{ project: Record<string, unknown> }>('/api/projects', input);
+    return { ...result.project, archived: result.project.status === 'ARCHIVED', createdBy: { id: Number(result.project.createdById ?? 0) } } as Project;
+  },
 
   /** PATCH /api/projects/:projectId -> rename and/or archive/restore. */
-  update: (projectId: number, input: Partial<{ name: string; archived: boolean }>) =>
-    api.patch<Project>(`/api/projects/${projectId}`, input),
+  update: async (projectId: number, input: Partial<{ name: string; archived: boolean }>) => {
+    const body: Record<string, unknown> = {};
+    if (input.name !== undefined) body.name = input.name;
+    const action = input.archived === true ? '/archive' : input.archived === false ? '/restore' : '';
+    const result = await api.patch<{ project: Record<string, unknown> }>(`/api/projects/${projectId}${action}`, body);
+    return { ...result.project, archived: result.project.status === 'ARCHIVED', createdBy: { id: Number(result.project.createdById ?? 0) } } as Project;
+  },
 
   /** DELETE /api/projects/:projectId -> 204. Real delete — cascades to its tasks. */
   remove: (projectId: number) => api.delete(`/api/projects/${projectId}`),
@@ -74,8 +99,17 @@ export const projectsApi = {
 
 export const tasksApi = {
   /** GET /api/projects/:projectId/tasks -> tasks already grouped by column. */
-  board: (projectId: number, signal?: AbortSignal) =>
-    api.get<Board>(`/api/projects/${projectId}/tasks`, signal),
+  board: async (projectId: number, signal?: AbortSignal) => {
+    const result = await api.get<{ tasks: Array<Record<string, unknown>> }>(`/api/projects/${projectId}/tasks`, signal);
+    const board: Record<string, Task[]> = { 'To Do': [], 'In Progress': [], Done: [] };
+    for (const raw of result.tasks) {
+      const status = raw.status === 'DONE' ? 'Done' : raw.status === 'IN_PROGRESS' ? 'In Progress' : 'To Do';
+      const assignee = raw.assignee as User | null;
+      const createdBy = raw.createdBy as User | null;
+      board[status].push({ ...raw, status, assignee, createdBy, isOverdue: Boolean(raw.dueDate && new Date(String(raw.dueDate)).getTime() < Date.now() && status !== 'Done') } as Task);
+    }
+    return board as Board;
+  },
 
   /**
    * POST /api/projects/:projectId/tasks -> 201.
@@ -85,7 +119,11 @@ export const tasksApi = {
   create: (
     projectId: number,
     input: { title: string; assigneeId: number | null; dueDate: string | null; status?: string }
-  ) => api.post<Task>(`/api/projects/${projectId}/tasks`, input),
+  ) => {
+    const body: Record<string, unknown> = { ...input };
+    if (typeof body.status === 'string') body.status = body.status === 'Done' ? 'DONE' : body.status === 'In Progress' ? 'IN_PROGRESS' : 'TODO';
+    return api.post<{ task: Task }>(`/api/projects/${projectId}/tasks`, body).then((result) => result.task);
+  },
 
   /**
    * PATCH /api/tasks/:taskId/status -> the move-between-columns endpoint.
@@ -93,8 +131,12 @@ export const tasksApi = {
    * status name persists. `Status` (the legacy 3) is a subtype of string, so
    * existing callers are unaffected.
    */
-  updateStatus: (taskId: number, status: string) =>
-    api.patch<Task>(`/api/tasks/${taskId}/status`, { status }),
+  updateStatus: async (taskId: number, status: string) => {
+    const current = await api.get<{ task: Record<string, unknown> }>(`/api/tasks/${taskId}`);
+    const backendStatus = status === 'Done' || status === 'DONE' ? 'DONE' : status === 'In Progress' || status === 'IN_PROGRESS' ? 'IN_PROGRESS' : 'TODO';
+    const result = await api.patch<{ task: Task }>(`/api/tasks/${taskId}`, { version: current.task.version, status: backendStatus });
+    return result.task;
+  },
 
   /**
    * PATCH /api/tasks/:taskId -> partial update.
@@ -104,7 +146,11 @@ export const tasksApi = {
   update: (
     taskId: number,
     input: Partial<{ title: string; assigneeId: number | null; dueDate: string | null }>
-  ) => api.patch<Task>(`/api/tasks/${taskId}`, input),
+  ) => api.get<{ task: Record<string, unknown> }>(`/api/tasks/${taskId}`).then((current) => {
+    const body: Record<string, unknown> = { ...input, version: current.task.version };
+    if (typeof body.status === 'string') body.status = body.status === 'Done' ? 'DONE' : body.status === 'In Progress' ? 'IN_PROGRESS' : 'TODO';
+    return api.patch<{ task: Task }>(`/api/tasks/${taskId}`, body).then((result) => result.task);
+  }),
 
   /** DELETE /api/tasks/:taskId -> 204, no body. */
   remove: (taskId: number) => api.delete(`/api/tasks/${taskId}`),

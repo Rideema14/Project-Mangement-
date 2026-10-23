@@ -2,12 +2,12 @@
   "name": "planora-taskboard-frontend",
   "version": "1.0.0",
   "private": true,
-  "description": "Task Board frontend — Next.js + TypeScript + Tailwind, built to the Planora Frontend Playbook.",
+  "description": "Task Board frontend \u2014 Next.js + TypeScript + Tailwind, built to the Planora Frontend Playbook.",
   "engines": {
     "node": ">=18.18"
   },
   "scripts": {
-    "dev": "next dev --turbopack",
+    "dev": "next dev",
     "dev:webpack": "next dev",
     "build": "next build",
     "start": "next start",
@@ -54,7 +54,6 @@
     "@types/node": "^22.15.3",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
-    "@vitejs/plugin-react": "^6.0.3",
     "autoprefixer": "^10.4.21",
     "eslint": "^9.30.1",
     "eslint-config-next": "^15.4.6",

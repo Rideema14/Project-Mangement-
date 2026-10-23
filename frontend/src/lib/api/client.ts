@@ -2,10 +2,10 @@
  * The single HTTP boundary between this app and the Task Board backend.
  *
  * Everything about the backend's wire format is handled here and nowhere else:
- *   - success envelope:  { success: true,  data: T }
- *   - error envelope:    { success: false, error: { message } }
+ *   - understands the backend's actual JSON responses (raw objects with message/data fields)
+ *   - sends the httpOnly authentication cookie on every request
  *   - 204 No Content on DELETE (no body to parse)
- *   - `Authorization: Bearer <token>` on every authenticated route
+ *   - includes the session cookie on authenticated routes
  */
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
@@ -27,21 +27,10 @@ export class ApiError extends Error {
 }
 
 /*
- * The token lives in module scope so the client stays a plain function rather
- * than a hook. AuthProvider is the only thing that writes to it, and it also
- * mirrors it to localStorage so a refresh doesn't sign the user out.
+ * Authentication uses the backend's httpOnly cookie. The browser manages it;
+ * JavaScript intentionally never reads or stores the JWT.
  */
-let authToken: string | null = null;
 let onUnauthorized: (() => void) | null = null;
-
-export function setAuthToken(token: string | null): void {
-  authToken = token;
-}
-
-/** Read the current token — used by the RTK Query baseQuery, which shares this source of truth. */
-export function getAuthToken(): string | null {
-  return authToken;
-}
 
 /** Lets AuthProvider log the user out when the backend rejects an expired token. */
 export function setUnauthorizedHandler(handler: (() => void) | null): void {
@@ -61,9 +50,6 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const { method = 'GET', body, formData, signal } = options;
 
   const headers: Record<string, string> = {};
-  if (authToken) {
-    headers.Authorization = `Bearer ${authToken}`;
-  }
   // Let the browser set the multipart Content-Type (it must append the boundary).
   if (body !== undefined && !formData) {
     headers['Content-Type'] = 'application/json';
@@ -74,6 +60,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     response = await fetch(`${BASE_URL}${path}`, {
       method,
       headers,
+      credentials: 'include',
       body: formData ?? (body !== undefined ? JSON.stringify(body) : undefined),
       signal,
     });
@@ -120,17 +107,20 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const envelope = payload as {
     success?: boolean;
     data?: T;
+    message?: string;
     error?: { message?: string };
   };
 
   if (!response.ok || envelope.success === false) {
     throw new ApiError(
       response.status,
-      envelope.error?.message ?? 'Something went wrong. Please try again.'
+      envelope.error?.message ?? envelope.message ?? 'Something went wrong. Please try again.'
     );
   }
 
-  return envelope.data as T;
+  // This Express backend returns resource objects directly (e.g. { user },
+  // { projects }, { task }) rather than wrapping every response in { data }.
+  return (envelope.success === true && 'data' in envelope ? envelope.data : payload) as T;
 }
 
 export const api = {

@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/Button';
 import { Field, Input } from '@/components/ui/Field';
 
 /** Mirrors auth.service.js — the server rejects anything shorter. */
-const MIN_PASSWORD_LENGTH = 6;
+const MIN_PASSWORD_LENGTH = 8;
 
 interface FieldErrors {
   name?: string;

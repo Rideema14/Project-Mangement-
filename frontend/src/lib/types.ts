@@ -19,6 +19,8 @@ export interface User {
   id: number;
   name: string;
   email: string;
+  role?: string;
+  isActive?: boolean;
 }
 
 /** The authenticated user, as returned inside the login/register payload. */
@@ -73,8 +75,12 @@ export interface VoiceParseResult {
 }
 
 export interface AuthPayload {
+  message?: string;
   user: AuthUser;
-  token: string;
+}
+
+export interface CurrentUserPayload {
+  user: AuthUser;
 }
 
 // ---------- AI Workspace Assistant ----------

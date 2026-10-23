@@ -210,6 +210,16 @@ router.patch("/:id/archive", async (req, res) => {
   res.json({ message: "Project archived", project });
 });
 
+// PATCH /projects/:id/restore -> Admin or that project's Manager
+router.patch("/:id/restore", async (req, res) => {
+  const id = parseId(req.params.id);
+  if (!id) return res.status(400).json({ message: "Invalid project id" });
+  if (!(await canViewProject(req.user!, id))) return res.status(404).json({ message: "Project not found" });
+  if (!(await canManageProject(req.user!, id))) return res.status(403).json({ message: "Only an Admin or the project manager can restore this project" });
+  const project = await prisma.project.update({ where: { id }, data: { status: "ACTIVE" } });
+  return res.json({ message: "Project restored", project });
+});
+
 // DELETE /projects/:id  -> ADMIN only
 router.delete("/:id", requireRole("ADMIN"), async (req, res) => {
   const id = parseId(req.params.id);

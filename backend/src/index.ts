@@ -25,7 +25,7 @@ app.use(express.json());
 app.use(cookieParser());
 
 // ---------- Routes ----------
-app.get("/health", async (_req, res) => {
+app.get("/api/health", async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
     const users = await prisma.user.count();
@@ -36,11 +36,11 @@ app.get("/health", async (_req, res) => {
   }
 });
 
-app.use("/auth", authRoutes);
-app.use("/users", userRoutes);
-app.use("/projects", projectRoutes);
-app.use("/projects/:id/tasks", projectTasksRouter);
-app.use("/tasks", taskRouter);
+app.use("/api/auth", authRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/projects", projectRoutes);
+app.use("/api/projects/:id/tasks", projectTasksRouter);
+app.use("/api/tasks", taskRouter);
 
 // ---------- Unknown route -> 404 ----------
 app.use((_req, res) => {
