@@ -1,0 +1,608 @@
+'use client';
+
+import { memo, useCallback, useMemo, useState } from 'react';
+import {
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  closestCorners,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  horizontalListSortingStrategy,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import {
+  Archive,
+  ArrowLeftToLine,
+  ArrowRightToLine,
+  CheckSquare,
+  GripVertical,
+  MoreHorizontal,
+  Palette,
+  Pencil,
+  Plus,
+  Settings2,
+  Trash2,
+} from 'lucide-react';
+import { useAppDispatch, useAppSelector } from '@/store/hooks';
+import { openTask } from '@/store/slices/uiSlice';
+import { setOrder, addSubtask } from '@/store/slices/tasksSlice';
+import { statusColors } from '@/lib/domain/status-color';
+import { getStatusIcon } from '@/lib/domain/status-icon';
+import { useTheme } from '@/lib/theme-context';
+import { cn } from '@/lib/design/cn';
+import type { TaskVM } from '@/lib/domain/types';
+import { TaskCardContent, resolveTaskPalette } from '@/features/task/TaskCardContent';
+import { useListData, type StatusColumn } from '@/features/list/useListData';
+import { useListActions } from '@/features/list/useListActions';
+import { useStatusActions } from '@/features/statuses/useStatusActions';
+import { StatusManager } from '@/features/statuses/StatusManager';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/Popover';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/DropdownMenu';
+import { IconButton } from '@/components/ui/Misc';
+import { HuePicker } from '@/components/domain/HuePicker';
+import { QuickAddTask } from '@/features/list/QuickAddTask';
+
+/** Prefix distinguishing a column-header drag (reordering statuses) from a task-card drag, in the one shared DndContext. */
+const COL_PREFIX = 'colhead:';
+
+export function BoardView({ listId }: { listId: string }) {
+  const { columns } = useListData(listId);
+  const { moveToStatus, deleteTask, updateTask } = useListActions(listId);
+  const { reorder: reorderStatus } = useStatusActions(listId);
+  const dispatch = useAppDispatch();
+  const commentsByTask = useAppSelector((s) => s.comments.byTaskId);
+  const [activeTask, setActiveTask] = useState<TaskVM | null>(null);
+
+  // Stable callbacks so memoized columns/cards don't re-render on every board render
+  // (notably during a drag, when dnd-kit re-renders the DndContext continuously).
+  const handleOpen = useCallback((id: number) => dispatch(openTask(id)), [dispatch]);
+  const handleDelete = useCallback(
+    (id: number, title: string, assigneeId?: number | null) => void deleteTask(id, title, assigneeId),
+    [deleteTask]
+  );
+  const handleEditTitle = useCallback((id: number, title: string) => void updateTask(id, { title }), [updateTask]);
+  const handleAddSubtask = useCallback(
+    (id: number, title: string) => dispatch(addSubtask({ taskId: id, title })),
+    [dispatch]
+  );
+
+  const byId = useMemo(() => {
+    const map = new Map<number, { task: TaskVM; statusId: string }>();
+    columns.forEach((col) => col.tasks.forEach((t) => map.set(t.id, { task: t, statusId: col.status.id })));
+    return map;
+  }, [columns]);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor)
+  );
+
+  function handleDragStart(e: DragStartEvent) {
+    const id = String(e.active.id);
+    if (id.startsWith(COL_PREFIX)) {
+      setActiveTask(null);
+      return;
+    }
+    setActiveTask(byId.get(Number(id))?.task ?? null);
+  }
+
+  function handleDragEnd(e: DragEndEvent) {
+    setActiveTask(null);
+    const { active, over } = e;
+    if (!over) return;
+    const activeId = String(active.id);
+    const overId = String(over.id);
+
+    if (activeId.startsWith(COL_PREFIX)) {
+      if (!overId.startsWith(COL_PREFIX)) return;
+      const activeStatusId = activeId.slice(COL_PREFIX.length);
+      const overStatusId = overId.slice(COL_PREFIX.length);
+      if (activeStatusId === overStatusId) return;
+      const toIndex = columns.findIndex((c) => c.status.id === overStatusId);
+      if (toIndex !== -1) reorderStatus(activeStatusId, toIndex);
+      return;
+    }
+
+    const taskId = Number(active.id);
+    const targetStatusId = overId.startsWith('col:') ? overId.slice(4) : byId.get(Number(overId))?.statusId;
+    if (!targetStatusId) return;
+    const targetStatus = columns.find((c) => c.status.id === targetStatusId)?.status;
+    if (!targetStatus) return;
+
+    const targetCol = columns.find((c) => c.status.id === targetStatusId);
+    const orderedIds = targetCol ? targetCol.tasks.map((t) => t.id).filter((id) => id !== taskId) : [];
+    const overIndex = overId.startsWith('col:') ? orderedIds.length : orderedIds.indexOf(Number(overId));
+    const insertAt = overIndex < 0 ? orderedIds.length : overIndex;
+    orderedIds.splice(insertAt, 0, taskId);
+
+    orderedIds.forEach((id, i) => dispatch(setOrder({ taskId: id, order: i })));
+    void moveToStatus(taskId, targetStatus, insertAt);
+  }
+
+  return (
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCorners}
+      autoScroll={{ threshold: { x: 0.15, y: 0.2 } }}
+      onDragStart={handleDragStart}
+      onDragEnd={handleDragEnd}
+      onDragCancel={() => setActiveTask(null)}
+    >
+      <div className="flex h-full gap-4 overflow-x-auto overflow-y-hidden px-5 py-5">
+        <SortableContext
+          items={columns.map((c) => `${COL_PREFIX}${c.status.id}`)}
+          strategy={horizontalListSortingStrategy}
+        >
+          {columns.map((col, index) => (
+            <BoardColumn
+              key={col.status.id}
+              column={col}
+              index={index}
+              columnCount={columns.length}
+              listId={listId}
+              commentsByTask={commentsByTask}
+              onOpen={handleOpen}
+              onDelete={handleDelete}
+              onEditTitle={handleEditTitle}
+              onAddSubtask={handleAddSubtask}
+            />
+          ))}
+        </SortableContext>
+        <AddStatusButton listId={listId} />
+      </div>
+
+      <DragOverlay dropAnimation={{ duration: 220, easing: 'cubic-bezier(0.16,1,0.3,1)' }}>
+        {activeTask && (
+          <div className="w-[264px] cursor-grabbing">
+            <TaskCardContent task={activeTask} overlay />
+          </div>
+        )}
+      </DragOverlay>
+    </DndContext>
+  );
+}
+
+const BoardColumn = memo(function BoardColumn({
+  column,
+  index,
+  columnCount,
+  listId,
+  commentsByTask,
+  onOpen,
+  onDelete,
+  onEditTitle,
+  onAddSubtask,
+}: {
+  column: StatusColumn;
+  index: number;
+  columnCount: number;
+  listId: string;
+  commentsByTask: Record<number, unknown[]>;
+  onOpen: (id: number) => void;
+  onDelete: (id: number, title: string, assigneeId?: number | null) => void;
+  onEditTitle: (id: number, title: string) => void;
+  onAddSubtask: (id: number, title: string) => void;
+}) {
+  const { theme } = useTheme();
+  const { setNodeRef, isOver } = useDroppable({ id: `col:${column.status.id}` });
+  const { rename, recolor, reorder, setArchived, remove } = useStatusActions(listId);
+  const {
+    attributes: colAttributes,
+    listeners: colListeners,
+    setNodeRef: setColumnNodeRef,
+    transform: colTransform,
+    transition: colTransition,
+    isDragging: colIsDragging,
+  } = useSortable({ id: `${COL_PREFIX}${column.status.id}` });
+  const c = statusColors(column.status.hue, theme);
+  const StatusIcon = getStatusIcon(column.status);
+  const [adding, setAdding] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [recoloring, setRecoloring] = useState(false);
+  const [nameDraft, setNameDraft] = useState(column.status.name);
+  const count = column.tasks.length;
+  const wipLimit = column.status.wipLimit ?? null;
+  const overWip = wipLimit != null && count > wipLimit;
+
+  function commitRename() {
+    setRenaming(false);
+    const trimmed = nameDraft.trim();
+    if (trimmed && trimmed !== column.status.name) rename(column.status.id, trimmed);
+    else setNameDraft(column.status.name);
+  }
+
+  return (
+    <section
+      ref={setColumnNodeRef}
+      style={{
+        transform: CSS.Translate.toString(colTransform),
+        transition: colTransition,
+        background: 'var(--color-surface-muted)',
+      }}
+      className={cn(
+        'flex w-[288px] shrink-0 animate-scale-in flex-col rounded-2xl border border-border-strong',
+        colIsDragging && 'opacity-50'
+      )}
+    >
+      <header
+        {...(renaming ? {} : colAttributes)}
+        {...(renaming ? {} : colListeners)}
+        className="flex cursor-grab items-center gap-2 rounded-t-2xl border-b border-border px-4 pt-4 pb-3 touch-none active:cursor-grabbing"
+      >
+        <GripVertical className="h-3.5 w-3.5 shrink-0 text-text-subtle/50" aria-hidden />
+        <StatusIcon className="h-4 w-4 shrink-0" style={{ color: c.solid }} strokeWidth={2} aria-hidden />
+        {renaming ? (
+          // eslint-disable-next-line jsx-a11y/no-autofocus
+          <input
+            autoFocus
+            value={nameDraft}
+            onChange={(e) => setNameDraft(e.target.value)}
+            onPointerDown={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitRename();
+              if (e.key === 'Escape') {
+                setNameDraft(column.status.name);
+                setRenaming(false);
+              }
+            }}
+            onBlur={commitRename}
+            className="min-w-0 flex-1 rounded border border-primary bg-surface px-1 text-sm font-semibold text-text outline-none"
+          />
+        ) : (
+          <h3 className="text-sm font-semibold text-text">{column.status.name}</h3>
+        )}
+        <span
+          className={cn(
+            'rounded-md px-1.5 py-0.5 text-[11px] font-medium',
+            overWip ? 'bg-danger-soft text-danger-fg' : 'bg-surface text-text-muted'
+          )}
+          title={wipLimit != null ? `WIP limit ${wipLimit}` : undefined}
+        >
+          {count}
+          {wipLimit != null ? `/${wipLimit}` : ''} {count === 1 ? 'task' : 'tasks'}
+        </span>
+        <button
+          type="button"
+          onClick={() => setAdding(true)}
+          onPointerDown={(e) => e.stopPropagation()}
+          aria-label={`Add task to ${column.status.name}`}
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-text-subtle transition-colors hover:bg-surface-muted hover:text-text"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+        <ColumnMenu
+          onMoveLeft={index > 0 ? () => reorder(column.status.id, index - 1) : undefined}
+          onMoveRight={index < columnCount - 1 ? () => reorder(column.status.id, index + 1) : undefined}
+          onRename={() => setRenaming(true)}
+          onRecolor={() => setRecoloring(true)}
+          onArchive={() => setArchived(column.status.id, true)}
+          onDelete={() => remove(column.status.id)}
+          accentColor={c.solid}
+        />
+        {recoloring && (
+          <Popover open onOpenChange={(o) => !o && setRecoloring(false)}>
+            <PopoverTrigger asChild>
+              <span className="h-0 w-0" />
+            </PopoverTrigger>
+            <PopoverContent className="w-auto" align="end">
+              <HuePicker value={column.status.hue} onChange={(hue) => recolor(column.status.id, hue)} />
+            </PopoverContent>
+          </Popover>
+        )}
+      </header>
+
+      <div className="relative min-h-0 flex-1">
+        {/* Faint status-colored watermark — sits behind the task list; opaque task
+            cards cover it from the top down as the column fills up. */}
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center" aria-hidden>
+          <StatusIcon style={{ color: c.solid }} className="h-28 w-28 opacity-[0.09]" strokeWidth={1.25} />
+        </div>
+
+        <div
+          ref={setNodeRef}
+          className={cn(
+            'relative h-full space-y-2.5 overflow-y-auto px-3 pb-3 pt-3 transition-colors',
+            isOver && 'rounded-b-2xl bg-primary-soft/20 ring-1 ring-inset ring-[color:var(--color-primary)]/30'
+          )}
+        >
+          {adding && (
+            <QuickAddTask
+              listId={listId}
+              statusId={column.status.id}
+              open={adding}
+              onOpenChange={setAdding}
+              hideTrigger
+            />
+          )}
+          <SortableContext items={column.tasks.map((t) => String(t.id))} strategy={verticalListSortingStrategy}>
+            <div className="space-y-2.5">
+              {column.tasks.map((task) => (
+                <SortableCard
+                  key={task.id}
+                  task={task}
+                  commentCount={commentsByTask[task.id]?.length ?? 0}
+                  onOpen={onOpen}
+                  onDelete={onDelete}
+                  onEditTitle={onEditTitle}
+                  onAddSubtask={onAddSubtask}
+                />
+              ))}
+            </div>
+          </SortableContext>
+          {count === 0 && !adding && (
+            <p className="px-1 py-6 text-center text-xs text-text-subtle">No tasks yet</p>
+          )}
+          <QuickAddTask listId={listId} statusId={column.status.id} />
+        </div>
+      </div>
+    </section>
+  );
+});
+
+const SortableCard = memo(function SortableCard({
+  task,
+  commentCount,
+  onOpen,
+  onDelete,
+  onEditTitle,
+  onAddSubtask,
+}: {
+  task: TaskVM;
+  commentCount: number;
+  onOpen: (id: number) => void;
+  onDelete: (id: number, title: string, assigneeId?: number | null) => void;
+  onEditTitle: (id: number, title: string) => void;
+  onAddSubtask: (id: number, title: string) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: String(task.id),
+    data: { statusId: task.status.id },
+  });
+  const { theme } = useTheme();
+  const cardAccent = resolveTaskPalette(task, theme).rail;
+  const [editing, setEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(task.title);
+  const [addingSubtask, setAddingSubtask] = useState(false);
+
+  function startEdit() {
+    setTitleDraft(task.title);
+    setEditing(true);
+  }
+  function commitEdit() {
+    setEditing(false);
+    const trimmed = titleDraft.trim();
+    if (trimmed && trimmed !== task.title) onEditTitle(task.id, trimmed);
+  }
+  function cancelEdit() {
+    setEditing(false);
+    setTitleDraft(task.title);
+  }
+
+  return (
+    <div className="animate-fade-in">
+      <div
+        ref={setNodeRef}
+        style={{ transform: CSS.Translate.toString(transform), transition }}
+        className={cn('group/sc relative cursor-grab active:cursor-grabbing', isDragging && 'opacity-40')}
+        {...attributes}
+        {...(editing ? {} : listeners)}
+        role="button"
+        tabIndex={0}
+        onClick={() => !editing && onOpen(task.id)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !editing) onOpen(task.id);
+        }}
+      >
+        <TaskCardContent
+          task={task}
+          commentCount={commentCount}
+          editing={editing}
+          titleDraft={titleDraft}
+          onTitleDraftChange={setTitleDraft}
+          onTitleCommit={commitEdit}
+          onTitleCancel={cancelEdit}
+        />
+        <CardMenu
+          onOpen={() => onOpen(task.id)}
+          onDelete={() => onDelete(task.id, task.title, task.assignee?.id ?? null)}
+          onEdit={startEdit}
+          onAddSubtask={() => setAddingSubtask(true)}
+          accentColor={cardAccent}
+        />
+      </div>
+      {addingSubtask && (
+        <QuickSubtaskForm
+          onSubmit={(title) => {
+            onAddSubtask(task.id, title);
+            setAddingSubtask(false);
+          }}
+          onCancel={() => setAddingSubtask(false)}
+        />
+      )}
+    </div>
+  );
+});
+
+/** Per-column status settings: rename, recolor, move, archive, delete. */
+function ColumnMenu({
+  onMoveLeft,
+  onMoveRight,
+  onRename,
+  onRecolor,
+  onArchive,
+  onDelete,
+  accentColor,
+}: {
+  onMoveLeft?: () => void;
+  onMoveRight?: () => void;
+  onRename: () => void;
+  onRecolor: () => void;
+  onArchive: () => void;
+  onDelete: () => void;
+  /** Column's own status color — used to tint the Delete/Trash icon so it matches the column instead of a generic red. */
+  accentColor: string;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          onPointerDown={(e) => e.stopPropagation()}
+          aria-label="Status settings"
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-text-subtle transition-colors hover:bg-surface-muted hover:text-text"
+        >
+          <MoreHorizontal className="h-4 w-4" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem onSelect={onRename}>
+          <Pencil className="h-4 w-4" /> Rename
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={onRecolor}>
+          <Palette className="h-4 w-4" /> Recolor
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled={!onMoveLeft} onSelect={onMoveLeft}>
+          <ArrowLeftToLine className="h-4 w-4" /> Move left
+        </DropdownMenuItem>
+        <DropdownMenuItem disabled={!onMoveRight} onSelect={onMoveRight}>
+          <ArrowRightToLine className="h-4 w-4" /> Move right
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onArchive}>
+          <Archive className="h-4 w-4" /> Archive
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={onDelete} style={{ color: accentColor }}>
+          <Trash2 className="h-4 w-4" /> Delete
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** Hover/focus card actions. Stops pointer/click from reaching the drag+open handlers. */
+function CardMenu({
+  onOpen,
+  onDelete,
+  onEdit,
+  onAddSubtask,
+  accentColor,
+}: {
+  onOpen: () => void;
+  onDelete: () => void;
+  onEdit: () => void;
+  onAddSubtask: () => void;
+  /** The card's own accent color — used to tint its Delete/Trash icon instead of a generic red. */
+  accentColor: string;
+}) {
+  return (
+    <div
+      className="absolute right-1.5 top-1.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/sc:opacity-100"
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+    >
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label="Task actions"
+            className="flex h-6 w-6 items-center justify-center rounded-md border border-border-strong bg-surface text-text-muted shadow-sm transition-colors hover:bg-surface-muted hover:text-text data-[state=open]:opacity-100"
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem onSelect={onAddSubtask}>
+            <CheckSquare className="h-4 w-4" /> Add subtask
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onEdit}>
+            <Pencil className="h-4 w-4" /> Edit
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={onOpen}>Open</DropdownMenuItem>
+          <DropdownMenuItem onSelect={onDelete} style={{ color: accentColor }}>
+            <Trash2 className="h-4 w-4" /> Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
+/** Inline "add a subtask" form, rendered below the card (sibling of the draggable node so drag/click handlers never intercept it). */
+function QuickSubtaskForm({ onSubmit, onCancel }: { onSubmit: (title: string) => void; onCancel: () => void }) {
+  const [title, setTitle] = useState('');
+  return (
+    <div className="mt-1.5 rounded-lg border border-primary bg-surface p-2 shadow-sm">
+      {/* eslint-disable-next-line jsx-a11y/no-autofocus */}
+      <input
+        autoFocus
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            const trimmed = title.trim();
+            if (trimmed) onSubmit(trimmed);
+            else onCancel();
+          }
+          if (e.key === 'Escape') onCancel();
+        }}
+        onBlur={() => {
+          if (!title.trim()) onCancel();
+        }}
+        placeholder="Subtask name…"
+        className="w-full rounded border border-border bg-transparent px-2 py-1 text-xs text-text outline-none placeholder:text-text-subtle"
+      />
+    </div>
+  );
+}
+
+function AddStatusButton({ listId }: { listId: string }) {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="flex h-11 w-[288px] shrink-0 items-center gap-2 self-start rounded-2xl border border-dashed border-border-strong px-4 text-sm text-text-muted transition-colors hover:bg-surface-muted hover:text-text"
+        >
+          <Plus className="h-4 w-4" /> Add / manage statuses
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-80" align="start">
+        <StatusManager listId={listId} />
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** Exposed so the list header can also open the status manager. */
+export function StatusManagerButton({ listId }: { listId: string }) {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <IconButton aria-label="Manage statuses">
+          <Settings2 className="h-4 w-4" />
+        </IconButton>
+      </PopoverTrigger>
+      <PopoverContent className="w-80" align="end">
+        <StatusManager listId={listId} />
+      </PopoverContent>
+    </Popover>
+  );
+}

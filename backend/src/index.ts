@@ -1,4 +1,4 @@
-import { config } from "dotenv";
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
@@ -10,7 +10,7 @@ import userRoutes from "./routes/users";
 if (!process.env.JWT_SECRET) {
   throw new Error("JWT_SECRET is missing in .env");
 }
-config();
+
 const app = express();
 const PORT = Number(process.env.PORT) || 4000;
 
