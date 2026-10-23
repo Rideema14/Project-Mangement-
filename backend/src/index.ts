@@ -5,6 +5,7 @@ import cookieParser from "cookie-parser";
 import { prisma } from "./prisma";
 import authRoutes from "./routes/auth";
 import projectRoutes from "./routes/projects";
+import { projectTasksRouter, taskRouter } from "./routes/tasks";
 config();
 
 if (!process.env.JWT_SECRET) {
@@ -38,6 +39,8 @@ app.get("/health", async (_req, res) => {
 
 app.use("/auth", authRoutes);
 app.use("/projects", projectRoutes);
+app.use("/projects/:id/tasks", projectTasksRouter);
+app.use("/tasks", taskRouter);
 
 // ---------- Unknown route -> 404 ----------
 app.use((_req, res) => {
